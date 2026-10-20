@@ -30,8 +30,7 @@ ROBOTS_ASSETS = ASSET_PATH + "/Robots"
 # Define the built in robots of the extension
 ROBOTS = {
     "Iris": ROBOTS_ASSETS + "/Iris/iris.usd",
-    "Pegasus": ROBOTS_ASSETS + "/Pegasus/pegasus.usd",
-    "PegasusOptimized": ROBOTS_ASSETS + "/Pegasus/pegasus_optimized.usdc"
+    "Pegasus": ROBOTS_ASSETS + "/Pegasus/pegasus.usd"
 } #, "Flying Cube": ROBOTS_ASSETS + "/iris_cube.usda"}
 
 # Setup the default simulation environments path
@@ -60,7 +59,7 @@ OMNIVERSE_ENVIRONMENTS = {
 
 PEGASUS_ENVIRONMENTS = {
     "Box Room": ASSET_PATH + "/Worlds/Box/Box.usd",
-    "Box with Cylinders": ASSET_PATH + "/Worlds/BoxWithCylinders/BoxWithCylinders_optimized.usdc"
+    "Box with Cylinders": ASSET_PATH + "/Worlds/BoxWithCylinders/BoxWithCylinders.usd"
 }
 
 SIMULATION_ENVIRONMENTS = {}
@@ -111,8 +110,7 @@ DEFAULT_WORLD_SETTINGS = WORLD_SETTINGS['px4']
 # Define where the thumbnail of the vehicle is located
 THUMBNAILS = {
     "Iris": ROBOTS_ASSETS + "/Iris/iris_thumbnail.png",
-    "Pegasus": ROBOTS_ASSETS + "/Pegasus/pegasus_thumbnail.png",
-    "PegasusOptimized": ROBOTS_ASSETS + "/Pegasus/pegasus_thumbnail.png"
+    "Pegasus": ROBOTS_ASSETS + "/Pegasus/pegasus_thumbnail.png"
 }
 
 # Define where the thumbail of the world is located
