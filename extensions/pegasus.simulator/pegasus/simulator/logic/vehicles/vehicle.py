@@ -97,6 +97,7 @@ class Vehicle:
 
         # Body rigid prim — created lazily after simulation starts
         self._body_rigid_prim: RigidPrim | None = None
+        self._rigid_prims: dict[str, RigidPrim] = {}
 
         # Add the current vehicle to the vehicle manager, so that it knows
         # that a vehicle was instantiated
@@ -224,6 +225,7 @@ class Vehicle:
 
             # Create (or re-create) the rigid prim wrapper now that physics is ready
             self._body_rigid_prim = RigidPrim(paths=self._stage_prefix + "/body")
+            self._rigid_prims = {"/body": self._body_rigid_prim}
 
             # Initialize the sensors
             for sensor in self._sensors:
@@ -246,6 +248,7 @@ class Vehicle:
 
             # Release the rigid prim wrapper so it can be re-created fresh on next play
             self._body_rigid_prim = None
+            self._rigid_prims = {}
 
             # Stop the sensors
             for sensor in self._sensors:
@@ -261,6 +264,11 @@ class Vehicle:
 
             self.stop()
 
+    def _get_rigid_prim(self, body_part: str) -> RigidPrim:
+        if body_part not in self._rigid_prims:
+            self._rigid_prims[body_part] = RigidPrim(paths=self._stage_prefix + body_part)
+        return self._rigid_prims[body_part]
+
     def apply_force(self, force, pos=[0.0, 0.0, 0.0], body_part="/body"):
         """
         Method that will apply a force on the rigidbody, on the part specified in the 'body_part' at its relative position
@@ -274,8 +282,7 @@ class Vehicle:
         if self._body_rigid_prim is None or not self._body_rigid_prim.is_physics_tensor_entity_valid():
             return
 
-        prim_path = self._stage_prefix + body_part
-        rigid_prim = RigidPrim(paths=prim_path) if body_part != "/body" else self._body_rigid_prim
+        rigid_prim = self._get_rigid_prim(body_part)
 
         forces = np.array([[force[0], force[1], force[2]]], dtype=np.float32)
         torques = np.zeros((1, 3), dtype=np.float32)
@@ -293,8 +300,7 @@ class Vehicle:
         if self._body_rigid_prim is None or not self._body_rigid_prim.is_physics_tensor_entity_valid():
             return
 
-        prim_path = self._stage_prefix + body_part
-        rigid_prim = RigidPrim(paths=prim_path) if body_part != "/body" else self._body_rigid_prim
+        rigid_prim = self._get_rigid_prim(body_part)
 
         forces = np.zeros((1, 3), dtype=np.float32)
         torques = np.array([[torque[0], torque[1], torque[2]]], dtype=np.float32)
@@ -310,31 +316,14 @@ class Vehicle:
             dt (float): The time elapsed between the previous and current function calls (s).
             context: Physics step context (unused, required by SimulationManager callback signature).
         """
-        if self._body_rigid_prim is None:
+        if self._body_rigid_prim is None or not self._body_rigid_prim.is_physics_tensor_entity_valid():
             return
 
-        # Get the current position and orientation from the body rigid prim
-        # get_world_poses() returns (positions wp.array Nx3, orientations wp.array Nx4 in wxyz)
-        positions, orientations = self._body_rigid_prim.get_world_poses()
-        pos = positions.numpy()[0]        # [x, y, z]
-        quat_wxyz = orientations.numpy()[0]  # [qw, qx, qy, qz]
-
-        # Get the attitude via the USD rotation (more accurate for orientation)
-        prim = self._current_stage.GetPrimAtPath(self._stage_prefix + "/body")
-        rotation_quat = get_world_transform_xform(prim).GetQuaternion()
-        rotation_quat_real = rotation_quat.GetReal()
-        rotation_quat_img = rotation_quat.GetImaginary()
-
-        # Get the linear and angular velocities
-        # get_velocities() returns (linear wp.array Nx3, angular wp.array Nx3) both in world frame
-        linear_vels, angular_vels = self._body_rigid_prim.get_velocities()
-        linear_vel = linear_vels.numpy()[0]   # [vx, vy, vz] in world frame
-        ang_vel_world = angular_vels.numpy()[0]  # [wx, wy, wz] in world frame, rad/s
-
-        # Convert warp float32 outputs to float64 so ROS 2 message fields pass PyFloat_Check
-        pos = pos.astype(np.float64)
-        linear_vel = linear_vel.astype(np.float64)
-        ang_vel_world = ang_vel_world.astype(np.float64)
+        # Raw tensor view reads avoid the per-call warp indexing/copies of get_world_poses()/get_velocities()
+        view = self._body_rigid_prim._physics_rigid_body_view
+        pose = view.get_transforms().numpy()[0].astype(np.float64)  # [x, y, z, qx, qy, qz, qw] in world frame
+        vel = view.get_velocities().numpy()[0].astype(np.float64)   # [vx, vy, vz, wx, wy, wz] in world frame
+        pos, linear_vel, ang_vel_world = pose[:3], vel[:3], vel[3:]
 
         # Get the linear acceleration of the body relative to the inertial frame, expressed in the inertial frame
         linear_acceleration = (linear_vel - self._state.linear_velocity) / dt if dt > 0.0 else np.zeros(3)
@@ -343,20 +332,15 @@ class Vehicle:
         self._state.position = np.array(pos)
 
         # Get the quaternion in the [qx, qy, qz, qw] standard
-        self._state.attitude = np.array(
-            [rotation_quat_img[0], rotation_quat_img[1], rotation_quat_img[2], rotation_quat_real]
-        )
+        self._state.attitude = pose[3:]
 
         # Express the velocity of the vehicle in the inertial frame X_dot = [x_dot, y_dot, z_dot]
         self._state.linear_velocity = np.array(linear_vel)
 
-        # The linear velocity V = [u,v,w] of the vehicle's body frame expressed in the body frame of reference
-        self._state.linear_body_velocity = (
-            Rotation.from_quat(self._state.attitude).inv().apply(self._state.linear_velocity)
-        )
-
-        # omega = [p, q, r] expressed in body frame
-        self._state.angular_velocity = Rotation.from_quat(self._state.attitude).inv().apply(np.array(ang_vel_world))
+        # Body-frame linear velocity V = [u,v,w] and angular velocity omega = [p,q,r]
+        body_vels = Rotation.from_quat(self._state.attitude).inv().apply(np.vstack((linear_vel, ang_vel_world)))
+        self._state.linear_body_velocity = body_vels[0]
+        self._state.angular_velocity = body_vels[1]
 
         # The acceleration of the vehicle expressed in the inertial frame
         self._state.linear_acceleration = linear_acceleration

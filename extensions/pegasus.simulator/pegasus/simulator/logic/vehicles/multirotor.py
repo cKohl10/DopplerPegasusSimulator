@@ -9,7 +9,7 @@ import numpy as np
 from pxr import UsdGeom
 
 import omni.usd
-from isaacsim.core.experimental.prims import Articulation
+from isaacsim.core.experimental.prims import Articulation, RigidPrim
 
 # The vehicle interface
 from pegasus.simulator.logic.vehicles.vehicle import Vehicle
@@ -93,15 +93,23 @@ class Multirotor(Vehicle):
         self._articulation: Articulation | None = None
         # Cache DOF indices for rotor joints keyed by rotor number
         self._rotor_dof_indices: dict[int, int] = {}
+        self._last_prop_velocity: dict[int, float] = {}
+        self._force_prim: RigidPrim | None = None
 
     def start(self):
         """Set up the articulation handle when simulation starts."""
         self._articulation = Articulation(paths=self._stage_prefix)
         self._rotor_dof_indices = {}
+        self._last_prop_velocity = {}
+        # Index 0 is the body, index i+1 is rotor i
+        self._force_prim = RigidPrim(
+            paths=[self._stage_prefix + "/body"] + [f"{self._stage_prefix}/rotor{i}" for i in range(self._thrusters._num_rotors)]
+        )
 
     def stop(self):
         """Release the articulation handle when simulation stops."""
         self._articulation = None
+        self._force_prim = None
         self._rotor_dof_indices = {}
 
     def update(self, dt: float, context=None):
@@ -126,21 +134,19 @@ class Multirotor(Vehicle):
         # Get the desired forces to apply to the vehicle
         forces_z, _, rolling_moment = self._thrusters.update(self._state, dt)
 
-        # Apply force to each rotor
-        for i in range(4):
-
-            # Apply the force in Z on the rotor frame
-            self.apply_force([0.0, 0.0, forces_z[i]], body_part="/rotor" + str(i))
-
-            # Generate the rotating propeller visual effect
+        for i in range(len(forces_z)):
             self.handle_propeller_visual(i, forces_z[i])
 
-        # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
-        self.apply_torque([0.0, 0.0, rolling_moment], "/body")
-
-        # Compute the total linear drag force to apply to the vehicle's body frame
         drag = self._drag.update(self._state, dt)
-        self.apply_force(drag, body_part="/body")
+
+        # Rotor thrust, rolling moment and drag applied in a single batched call (each in its own local frame)
+        if self._force_prim is not None and self._force_prim.is_physics_tensor_entity_valid():
+            forces = np.zeros((len(forces_z) + 1, 3), dtype=np.float32)
+            torques = np.zeros_like(forces)
+            forces[0] = drag
+            forces[1:, 2] = forces_z
+            torques[0, 2] = rolling_moment
+            self._force_prim.apply_forces_and_torques_at_pos(forces=forces, torques=torques, local_frame=True)
 
         # Call the update methods in all backends
         for backend in self._backends:
@@ -189,6 +195,9 @@ class Multirotor(Vehicle):
         else:
             velocity = 0.0
 
+        if self._last_prop_velocity.get(rotor_number) == velocity:
+            return
+        self._last_prop_velocity[rotor_number] = velocity
         self._articulation.set_dof_velocities([[velocity]], dof_indices=[dof_idx])
 
     def force_and_torques_to_velocities(self, force: float, torque: np.ndarray):
